@@ -1,13 +1,18 @@
+"""
+Simple webpage downloader.
+"""
+
 import requests
-from requests.exceptions import RequestException
 
 
-def download(url: str):
+def download(url):
 
     headers = {
-        "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/138.0 Safari/537.36"
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/138.0 Safari/537.36"
+        )
     }
 
     try:
@@ -25,13 +30,16 @@ def download(url: str):
             "url": response.url,
             "html": response.text,
             "size": len(response.text),
-            "headers": dict(response.headers),
+            "error": None,
         }
 
-    except RequestException as ex:
+    except Exception as ex:
 
         return {
             "success": False,
             "status": None,
+            "url": url,
+            "html": "",
+            "size": 0,
             "error": str(ex),
         }

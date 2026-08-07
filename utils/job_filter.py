@@ -1,16 +1,24 @@
 """
-Filters links that are likely to be teaching jobs.
+Only keep links that are likely to be job postings.
 """
 
-KEYWORDS = [
+TITLE_KEYWORDS = [
     "accounting",
-    "financial accounting",
-    "managerial accounting",
     "finance",
-    "business",
     "economics",
-    "mba",
     "cpa",
+]
+
+JOB_KEYWORDS = [
+    "job",
+    "jobs",
+    "career",
+    "careers",
+    "employment",
+    "position",
+    "vacancy",
+    "vacancies",
+    "posting",
     "faculty",
     "associate faculty",
     "adjunct",
@@ -18,36 +26,40 @@ KEYWORDS = [
     "lecturer",
     "instructor",
     "facilitator",
-    "course developer",
-    "course writer",
-    "marker",
-    "grader",
-    "teaching",
 ]
 
 
 def filter_job_links(links):
-
     results = []
     seen = set()
 
     for link in links:
+        text = link["text"].strip().lower()
+        url = link["url"].lower()
 
-        text = link["text"].strip()
+        searchable = text + " " + url
 
-        if len(text) < 3:
+        # Ignore obvious non-job pages
+        if any(x in searchable for x in [
+            "program",
+            "degree",
+            "mba",
+            "bachelor",
+            "master of",
+            "directory",
+            "about",
+            "admissions",
+            "tuition",
+        ]):
             continue
 
-        searchable = (
-            text.lower()
-            + " "
-            + link["url"].lower()
-        )
+        # Must contain at least one job word
+        if not any(word in searchable for word in JOB_KEYWORDS):
+            continue
 
-        if any(keyword in searchable for keyword in KEYWORDS):
-
-            if link["url"] not in seen:
-                seen.add(link["url"])
-                results.append(link)
+        # Remove duplicates
+        if url not in seen:
+            seen.add(url)
+            results.append(link)
 
     return results

@@ -1,6 +1,6 @@
 """
 Academic Job Bot
-Version 0.3
+Version 0.4
 
 Main entry point.
 """
@@ -11,16 +11,15 @@ from utils.platform_detector import detect_platform
 from utils.link_extractor import extract_links
 from utils.job_filter import filter_job_links
 from utils.job_checker import is_job_posting
+from utils.csv_writer import write_jobs
 
 
 def print_header():
-
     print()
     print("=" * 80)
     print(" Academic Job Bot ")
     print("=" * 80)
     print()
-
 
 def check_institution(institution):
 
@@ -31,14 +30,16 @@ def check_institution(institution):
     result = download(institution.career_page)
 
     if not result["success"]:
-
-        print(f"ERROR: {result.get('error','Unknown error')}")
+        print(f"❌ ERROR: {result.get('error', 'Unknown error')}")
         print()
-
         return []
 
-    print(f"HTTP Status : {result['status']}")
-    print(f"Platform    : {detect_platform(result['html'], result['url'])}")
+    platform = detect_platform(
+        result["html"],
+        result["url"]
+    )
+
+    print(f"Platform : {platform}")
 
     links = extract_links(
         result["html"],
@@ -49,53 +50,31 @@ def check_institution(institution):
 
     candidate_links = filter_job_links(links)
 
-    print(f"Candidates  : {len(candidate_links)}")
+    print(f"Potential Job Links : {len(candidate_links)}")
 
     jobs = []
 
-    if len(candidate_links) == 0:
+    for candidate in candidate_links:
 
-        print("No possible teaching jobs found.")
+        job = {
+            "institution": institution.institution,
+            "title": candidate["text"].strip(),
+            "url": candidate["url"]
+        }
+
+        jobs.append(job)
+
+        print("✓ Possible Job")
+        print(f"Title : {job['title']}")
+        print(f"URL   : {job['url']}")
         print()
 
-        return jobs
-
-    print()
-
-    print("Checking candidate pages...")
-
-    print()
-
-    for candidate in candidate_links[:20]:
-
-        page = download(candidate["url"])
-
-        if not page["success"]:
-            continue
-
-        if is_job_posting(page["html"]):
-
-            job = {
-                "institution": institution.institution,
-                "title": candidate["text"],
-                "url": candidate["url"]
-            }
-
-            jobs.append(job)
-
-            print(f"FOUND JOB")
-            print(f"Title : {job['title']}")
-            print(f"Link  : {job['url']}")
-            print()
-
     if len(jobs) == 0:
-
-        print("No confirmed jobs found.")
+        print("No possible jobs found.")
 
     print()
 
     return jobs
-
 
 def main():
 
@@ -103,8 +82,7 @@ def main():
 
     institutions = load_institutions()
 
-    print(f"Searching {len(institutions)} institutions")
-
+    print(f"Searching {len(institutions)} institutions...")
     print()
 
     all_jobs = []
@@ -121,11 +99,10 @@ def main():
     print("=" * 80)
     print()
 
-    print(f"Total Jobs Found: {len(all_jobs)}")
-
+    print(f"Total Jobs Found : {len(all_jobs)}")
     print()
 
-    if len(all_jobs):
+    if all_jobs:
 
         for job in all_jobs:
 
@@ -136,15 +113,17 @@ def main():
 
     else:
 
-        print("No teaching jobs detected.")
+        print("No teaching jobs found.")
+
+    # Save results to CSV
+    write_jobs(all_jobs)
 
     print()
-
     print("=" * 80)
     print(" Finished ")
     print("=" * 80)
+    print()
 
 
 if __name__ == "__main__":
-
     main()
