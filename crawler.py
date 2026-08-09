@@ -1,17 +1,15 @@
 """
 Academic Job Bot
-Simple personal job finder.
+Crawls institutional academic-career pages and extracts relevant teaching jobs.
 
-Version 1.2
-
-- Searches institutional career pages
-- Follows relevant career/job pages
-- Recognizes TRU HRSmart/Deltek job systems
-- Extracts actual job posting links
-- Saves results to jobs_found.csv
+Version 2.0
 """
 
 import re
+from collections import deque
+from urllib.parse import urlparse
+
+from bs4 import BeautifulSoup
 
 from utils.institution_loader import load_institutions
 from utils.downloader import download
@@ -20,25 +18,47 @@ from utils.job_filter import filter_job_links
 from utils.csv_writer import write_jobs
 
 
-CAREER_PAGE_WORDS = [
+MAX_CRAWL_DEPTH = 2
+MAX_CRAWL_PAGES = 30
+
+CAREER_PAGE_WORDS = (
     "open learning",
     "current openings",
+    "current opportunities",
     "job postings",
     "job opportunities",
+    "employment opportunities",
     "faculty positions",
     "faculty opportunities",
+    "faculty & instructors",
     "academic positions",
     "academic opportunities",
     "associate faculty",
     "contract faculty",
     "part-time faculty",
     "part time faculty",
-    "adjunct",
-    "sessional",
+    "adjunct opportunities",
+    "sessional opportunities",
     "instructor positions",
     "faculty openings",
     "teaching opportunities",
-]
+    "view all available jobs",
+    "view positions",
+)
+
+EMBEDDED_JOB_URL_HINTS = (
+    "job",
+    "career",
+    "workday",
+    "dayforce",
+    "interfolio",
+    "talent",
+    "recruit",
+    "ats",
+)
+
+TRU_HOST = "tru.hua.hrsmart.com"
+TRU_POSTING_RE = re.compile(r"/hr/ats/Posting/view/(\d+)", re.IGNORECASE)
 
 
 def print_header():
@@ -50,337 +70,279 @@ def print_header():
 
 
 def looks_like_career_page(link):
-
     text = link.get("text", "").lower()
     url = link.get("url", "").lower()
 
-    searchable = text + " " + url
+    if link.get("type") == "iframe":
+        return any(hint in url for hint in EMBEDDED_JOB_URL_HINTS)
 
-    return any(
-        word in searchable
-        for word in CAREER_PAGE_WORDS
-    )
+    searchable = f"{text} {url}"
+    return any(word in searchable for word in CAREER_PAGE_WORDS)
 
 
 def is_tru_hrsmart(url):
-
+    parsed = urlparse(url)
     return (
-        "tru.hua.hrsmart.com" in url.lower()
-        and "/hr/ats/" in url.lower()
+        parsed.hostname
+        and parsed.hostname.lower() == TRU_HOST
+        and "/hr/ats/" in parsed.path.lower()
     )
 
 
-def extract_tru_postings(html):
+def is_tru_posting(url):
+    if not is_tru_hrsmart(url):
+        return False
+    return TRU_POSTING_RE.search(urlparse(url).path) is not None
 
-    """
-    Extract TRU HRSmart posting IDs from the page.
 
-    Example:
+def _title_from_html(html):
+    soup = BeautifulSoup(html, "html.parser")
 
-    /hr/ats/Posting/view/28086
+    for selector in ("h1", "h2", "title"):
+        node = soup.select_one(selector)
+        if not node:
+            continue
 
-    becomes:
+        title = node.get_text(" ", strip=True)
+        if not title:
+            continue
 
-    https://tru.hua.hrsmart.com/hr/ats/Posting/view/28086
-    """
-
-    pattern = r"/hr/ats/Posting/view/(\d+)"
-
-    matches = re.findall(pattern, html)
-
-    posting_ids = []
-
-    for posting_id in matches:
-
-        if posting_id not in posting_ids:
-            posting_ids.append(posting_id)
-
-    jobs = []
-
-    for posting_id in posting_ids:
-
-        jobs.append(
-            {
-                "institution": "Thompson Rivers University",
-                "title": "TRU Open Learning / Faculty Posting",
-                "url": (
-                    "https://tru.hua.hrsmart.com"
-                    f"/hr/ats/Posting/view/{posting_id}"
-                )
-            }
+        title = re.sub(
+            r"^Deltek Talent Management\s*-\s*",
+            "",
+            title,
+            flags=re.IGNORECASE,
         )
+        return title.strip()
+
+    return ""
+
+
+def extract_tru_postings(html):
+    """Extract TRU HRSmart posting links and their anchor titles."""
+
+    soup = BeautifulSoup(html, "html.parser")
+    jobs = []
+    seen = set()
+
+    for anchor in soup.find_all("a", href=True):
+        href = anchor["href"]
+        match = TRU_POSTING_RE.search(href)
+        if not match:
+            continue
+
+        posting_id = match.group(1)
+        url = f"https://{TRU_HOST}/hr/ats/Posting/view/{posting_id}"
+
+        if url in seen:
+            continue
+
+        seen.add(url)
+        title = (
+            anchor.get_text(" ", strip=True)
+            or "TRU Open Learning / Faculty Posting"
+        )
+
+        jobs.append({
+            "institution": "Thompson Rivers University",
+            "title": title,
+            "url": url,
+        })
+
+    # Fallback for HTML/JS that contains posting URLs without anchors.
+    for posting_id in TRU_POSTING_RE.findall(html):
+        url = f"https://{TRU_HOST}/hr/ats/Posting/view/{posting_id}"
+        if url in seen:
+            continue
+
+        seen.add(url)
+        jobs.append({
+            "institution": "Thompson Rivers University",
+            "title": "TRU Open Learning / Faculty Posting",
+            "url": url,
+        })
 
     return jobs
 
 
-def check_institution(institution):
+def _add_job(jobs, seen_urls, institution_name, title, url):
+    title = re.sub(r"\s+", " ", title or "").strip()
+    url = url.strip()
 
+    if not title or not url or url in seen_urls:
+        return False
+
+    jobs.append({
+        "institution": institution_name,
+        "title": title,
+        "url": url,
+    })
+    seen_urls.add(url)
+    return True
+
+
+def _enrich_tru_job(job):
+    if "TRU Open Learning / Faculty Posting" not in job["title"]:
+        return job
+
+    page = download(job["url"])
+    if page["success"]:
+        title = _title_from_html(page["html"])
+        if title:
+            job["title"] = title
+
+    return job
+
+
+def check_institution(institution):
     print("=" * 80)
     print(institution.institution)
     print("=" * 80)
 
-    result = download(institution.career_page)
-
-    if not result["success"]:
-
-        print(
-            f"ERROR: HTTP {result.get('status')} - "
-            f"{result.get('error')}"
-        )
-
-        print()
-
-        return []
-
-    print(f"Page: {result['url']}")
-    print(f"HTTP: {result['status']}")
-
     jobs = []
+    seen_job_urls = set()
+    visited_pages = set()
+    queued_pages = {institution.career_page}
+    queue = deque([(institution.career_page, 0)])
 
-    # ---------------------------------------------------------
-    # SPECIAL CASE: TRU HRSMART
-    # ---------------------------------------------------------
+    while queue and len(visited_pages) < MAX_CRAWL_PAGES:
+        page_url, depth = queue.popleft()
 
-    if is_tru_hrsmart(result["url"]):
+        if page_url in visited_pages:
+            continue
 
-        print("Detected TRU HRSmart job system.")
-
-        jobs = extract_tru_postings(
-            result["html"]
-        )
-
-        print(
-            f"TRU postings found: {len(jobs)}"
-        )
-
-        for job in jobs:
-
-            print()
-            print(f"• {job['title']}")
-            print(f"  {job['url']}")
+        visited_pages.add(page_url)
 
         print()
+        print(f"Checking depth {depth}: {page_url}")
 
-        return jobs
-
-    # ---------------------------------------------------------
-    # LEVEL 1
-    # ---------------------------------------------------------
-
-    links = extract_links(
-        result["html"],
-        result["url"]
-    )
-
-    print(
-        f"Level 1 links: {len(links)}"
-    )
-
-    # ---------------------------------------------------------
-    # FIND SECOND-LEVEL CAREER PAGES
-    # ---------------------------------------------------------
-
-    second_level_pages = []
-
-    for link in links:
-
-        if looks_like_career_page(link):
-
-            second_level_pages.append(link)
-
-    # Remove duplicate URLs.
-
-    unique_pages = []
-    seen = set()
-
-    for link in second_level_pages:
-
-        url = link["url"]
-
-        if url not in seen:
-
-            seen.add(url)
-            unique_pages.append(link)
-
-    print(
-        f"Career/job pages to inspect: "
-        f"{len(unique_pages)}"
-    )
-
-    # ---------------------------------------------------------
-    # LEVEL 2
-    # ---------------------------------------------------------
-
-    for page_link in unique_pages[:10]:
-
-        print()
-        print(
-            f"Checking: "
-            f"{page_link['text'].strip()}"
-        )
-
-        print(
-            page_link["url"]
-        )
-
-        page = download(
-            page_link["url"]
-        )
-
+        page = download(page_url)
         if not page["success"]:
-
             print(
-                f"Could not download "
-                f"(HTTP {page.get('status')})"
+                f"Could not download (HTTP {page.get('status')}): "
+                f"{page.get('error')}"
             )
-
             continue
 
-        # -----------------------------------------------------
-        # TRU HRSMART MAY APPEAR AT LEVEL 2
-        # -----------------------------------------------------
+        final_url = page["url"]
+        visited_pages.add(final_url)
+        print(f"HTTP: {page['status']}")
 
-        if is_tru_hrsmart(page["url"]):
-
-            print(
-                "Detected TRU HRSmart job system."
+        # A direct TRU posting is itself a job.
+        if is_tru_posting(final_url):
+            title = (
+                _title_from_html(page["html"])
+                or "TRU Open Learning / Faculty Posting"
             )
-
-            tru_jobs = extract_tru_postings(
-                page["html"]
-            )
-
-            print(
-                f"TRU postings found: "
-                f"{len(tru_jobs)}"
-            )
-
-            jobs.extend(tru_jobs)
-
-            continue
-
-        # -----------------------------------------------------
-        # NORMAL HTML PAGE
-        # -----------------------------------------------------
-
-        second_links = extract_links(
-            page["html"],
-            page["url"]
-        )
-
-        print(
-            f"Links on page: "
-            f"{len(second_links)}"
-        )
-
-        candidate_links = filter_job_links(
-            second_links
-        )
-
-        print(
-            f"Relevant job links: "
-            f"{len(candidate_links)}"
-        )
-
-        for candidate in candidate_links:
-
-            title = candidate["text"].strip()
-
-            if not title:
-                continue
-
-            job = {
-                "institution": institution.institution,
-                "title": title,
-                "url": candidate["url"]
-            }
-
-            if any(
-                existing["url"] == job["url"]
-                for existing in jobs
+            if _add_job(
+                jobs,
+                seen_job_urls,
+                institution.institution,
+                title,
+                final_url,
             ):
+                print(f"✓ {title}")
+            continue
+
+        # TRU listing pages often contain posting URLs that do not behave
+        # like normal HTML job links.
+        if is_tru_hrsmart(final_url):
+            tru_jobs = extract_tru_postings(page["html"])
+            for job in tru_jobs:
+                job["institution"] = institution.institution
+                job = _enrich_tru_job(job)
+                if _add_job(
+                    jobs,
+                    seen_job_urls,
+                    job["institution"],
+                    job["title"],
+                    job["url"],
+                ):
+                    print(f"✓ {job['title']}")
+            continue
+
+        links = extract_links(page["html"], final_url)
+        print(f"Links found: {len(links)}")
+
+        # First inspect direct job links on the current page. The old crawler
+        # only inspected links after navigating to a second-level career page,
+        # which caused sites such as Athabasca to be skipped entirely.
+        for candidate in filter_job_links(links):
+            title = candidate["text"]
+            url = candidate["url"]
+
+            if is_tru_posting(url):
+                candidate_job = {
+                    "institution": institution.institution,
+                    "title": title,
+                    "url": url,
+                }
+                candidate_job = _enrich_tru_job(candidate_job)
+                title = candidate_job["title"]
+                url = candidate_job["url"]
+
+            if _add_job(
+                jobs,
+                seen_job_urls,
+                institution.institution,
+                title,
+                url,
+            ):
+                print(f"✓ {title}")
+                print(f"  {url}")
+
+        # Follow only links that look like career/job-listing pages. This
+        # keeps the crawler focused while allowing two levels of navigation.
+        if depth >= MAX_CRAWL_DEPTH:
+            continue
+
+        for link in links:
+            if not looks_like_career_page(link):
                 continue
 
-            jobs.append(job)
+            next_url = link["url"].strip()
+            if not next_url or next_url in visited_pages or next_url in queued_pages:
+                continue
 
-            print()
-            print(
-                f"✓ {job['title']}"
-            )
-
-            print(
-                f"  {job['url']}"
-            )
+            queued_pages.add(next_url)
+            queue.append((next_url, depth + 1))
 
     print()
-    print(
-        f"Total possible jobs found: "
-        f"{len(jobs)}"
-    )
-
+    print(f"Pages inspected: {len(visited_pages)}")
+    print(f"Total possible jobs found: {len(jobs)}")
     print()
 
     return jobs
 
 
 def main():
-
     print_header()
 
     institutions = load_institutions()
-
-    print(
-        f"Searching "
-        f"{len(institutions)} institutions..."
-    )
-
+    print(f"Searching {len(institutions)} institutions...")
     print()
 
     all_jobs = []
 
     for institution in institutions:
-
-        jobs = check_institution(
-            institution
-        )
-
-        all_jobs.extend(jobs)
-
-    # ---------------------------------------------------------
-    # REMOVE DUPLICATES
-    # ---------------------------------------------------------
+        all_jobs.extend(check_institution(institution))
 
     unique_jobs = []
     seen_urls = set()
 
     for job in all_jobs:
-
         if job["url"] in seen_urls:
             continue
 
         seen_urls.add(job["url"])
         unique_jobs.append(job)
 
-    # ---------------------------------------------------------
-    # SUMMARY
-    # ---------------------------------------------------------
-
     print("=" * 80)
     print("SUMMARY")
     print("=" * 80)
-
     print()
-
-    print(
-        f"Total possible jobs: "
-        f"{len(unique_jobs)}"
-    )
-
+    print(f"Total possible jobs: {len(unique_jobs)}")
     print()
-
-    # ---------------------------------------------------------
-    # SAVE
-    # ---------------------------------------------------------
 
     write_jobs(unique_jobs)
 
