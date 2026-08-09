@@ -46,6 +46,17 @@ CAREER_PAGE_WORDS = (
     "view positions",
 )
 
+EMBEDDED_JOB_URL_HINTS = (
+    "job",
+    "career",
+    "workday",
+    "dayforce",
+    "interfolio",
+    "talent",
+    "recruit",
+    "ats",
+)
+
 TRU_HOST = "tru.hua.hrsmart.com"
 TRU_POSTING_RE = re.compile(r"/hr/ats/Posting/view/(\d+)", re.IGNORECASE)
 
@@ -61,6 +72,10 @@ def print_header():
 def looks_like_career_page(link):
     text = link.get("text", "").lower()
     url = link.get("url", "").lower()
+
+    if link.get("type") == "iframe":
+        return any(hint in url for hint in EMBEDDED_JOB_URL_HINTS)
+
     searchable = f"{text} {url}"
     return any(word in searchable for word in CAREER_PAGE_WORDS)
 
