@@ -1,32 +1,64 @@
 """
-Writes discovered jobs to a CSV file.
+Academic Job Bot - CSV Writer
+Version 1.6
 """
 
 import csv
-from pathlib import Path
 
 
-OUTPUT_FILE = Path("jobs_found.csv")
+CSV_FILE = "jobs_found.csv"
+
+
+FIELDNAMES = [
+    "rank",
+    "match_score",
+    "institution",
+    "title",
+    "field",
+    "position_type",
+    "term",
+    "deadline",
+    "online",
+    "location",
+    "reason",
+    "url",
+    "source_url",
+]
 
 
 def write_jobs(jobs):
 
-    with open(OUTPUT_FILE, "w", newline="", encoding="utf-8") as f:
+    with open(
+        CSV_FILE,
+        "w",
+        newline="",
+        encoding="utf-8",
+    ) as file:
 
-        writer = csv.writer(f)
+        writer = csv.DictWriter(
+            file,
+            fieldnames=FIELDNAMES,
+            extrasaction="ignore",
+        )
 
-        writer.writerow([
-            "Institution",
-            "Job Title",
-            "URL"
-        ])
+        writer.writeheader()
 
         for job in jobs:
 
-            writer.writerow([
-                job["institution"],
-                job["title"],
-                job["url"]
-            ])
+            row = {}
 
-    print(f"\nSaved {len(jobs)} jobs to {OUTPUT_FILE}")
+            for field in FIELDNAMES:
+
+                row[field] = job.get(
+                    field,
+                    ""
+                )
+
+            writer.writerow(
+                row
+            )
+
+    print(
+        f"Saved {len(jobs)} "
+        f"jobs to {CSV_FILE}"
+    )
